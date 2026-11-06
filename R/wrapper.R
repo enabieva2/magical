@@ -469,6 +469,8 @@ prepare_magical_object = function(deg, das, RNA_counts, ATAC_counts, niche_label
   return(loaded_data)
 }
 
+
+
 #' Run MAGICAL
 #' 
 #' Run MAGICAL
@@ -494,7 +496,9 @@ run_magical_main = function(loaded_data, TAD_file_path, dc = 5e5, iteration_num,
   }
   Initial_model<-MAGICAL_initialization(loaded_data, Candidate_circuits)
   Circuits_linkage_posterior<-MAGICAL_estimation(loaded_data, Candidate_circuits, Initial_model, iteration_num = 1000)
+  
   res = MAGICAL_circuits_output(Output_file_path, Candidate_circuits, Circuits_linkage_posterior, ...)
+  plot_convergence(Circuits_linkage_posterior) 
   # save(Candidate_circuits, Circuits_linkage_posterior, file = "MAGICAL_results.RData")
   return(res)
 }

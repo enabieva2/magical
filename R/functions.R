@@ -524,14 +524,14 @@ Candidate_circuits_construction_without_TAD <- function(loaded_data, distance_co
   Candidate_TFs <- Candidate_TFs[index, ]
   Candidate_TF_Peak_Binding <- Candidate_TF_Peak_Binding[, index]
 
-  index <- match(selected_TFs, scRNA_Genes$Gene_symbols)
-  Candidate_TF_log2Count <- RNA_log2[index, ]
+#  index <- match(selected_TFs, scRNA_Genes$Gene_symbols)
+#  Candidate_TF_log2Count <- RNA_log2[index, ]
 
-  TF_index <- which(rowSums(Candidate_TF_log2Count) > 0)
-  Candidate_TFs <- Candidate_TFs[TF_index, ]
-  Candidate_TF_Peak_Binding <- Candidate_TF_Peak_Binding[, TF_index]
-  Candidate_TF_log2Count <- Candidate_TF_log2Count[TF_index, ]
-  Candidate_TF_log2Count <- sweep(Candidate_TF_log2Count, 1, rowMeans(Candidate_TF_log2Count), "-")
+#  TF_index <- which(rowSums(Candidate_TF_log2Count) > 0)
+#  Candidate_TFs <- Candidate_TFs[TF_index, ]
+#  Candidate_TF_Peak_Binding <- Candidate_TF_Peak_Binding[, TF_index]
+#  Candidate_TF_log2Count <- Candidate_TF_log2Count[TF_index, ]
+#  Candidate_TF_log2Count <- sweep(Candidate_TF_log2Count, 1, rowMeans(Candidate_TF_log2Count), "-")
 
 
   # final filtering for candidate circuits
@@ -543,7 +543,8 @@ Candidate_circuits_construction_without_TAD <- function(loaded_data, distance_co
   Candidate_Peak_Gene_looping <- Candidate_Peak_Gene_looping[Peak_index, Gene_index]
 
   Candidate_TFs <- Candidate_TFs[TF_index, ]
-  Candidate_TF_log2Count <- Candidate_TF_log2Count[TF_index, ]
+
+#  Candidate_TF_log2Count <- Candidate_TF_log2Count[TF_index, ]
 
   Candidate_Peaks <- Candidate_Peaks[Peak_index, ]
   Candidate_Peak_log2Count <- Candidate_Peak_log2Count[Peak_index, ]
@@ -553,7 +554,7 @@ Candidate_circuits_construction_without_TAD <- function(loaded_data, distance_co
 
   Candidate_circuits <- list(
     "TFs" = Candidate_TFs,
-    "TF_log2Count" = Candidate_TF_log2Count,
+ #   "TF_log2Count" = Candidate_TF_log2Count,
     "Peaks" = Candidate_Peaks,
     "Peak_log2Count" = Candidate_Peak_log2Count,
     "Genes" = Candidate_Genes,
@@ -582,9 +583,9 @@ Candidate_circuits_construction_without_TAD <- function(loaded_data, distance_co
 #' @importFrom Matrix colSums rowSums sparseMatrix as.matrix
 #'
 #' @export
-MAGICAL_initialization <- function(loaded_data, Candidate_circuits) {
+MAGICAL_initialization <- function(loaded_data, Candidate_circuits, T_VAR = 10) {
   Candidate_TFs <- Candidate_circuits$TFs
-  Candidate_TF_log2Count <- Candidate_circuits$TF_log2Count
+#  Candidate_TF_log2Count <- Candidate_circuits$TF_log2Count
 
   Candidate_Peaks <- Candidate_circuits$Peaks
   Candidate_Peak_log2Count <- Candidate_circuits$Peak_log2Count
@@ -601,37 +602,105 @@ MAGICAL_initialization <- function(loaded_data, Candidate_circuits) {
   P <- nrow(Candidate_Peaks) # total number of candidate Peaks
   G <- nrow(Candidate_Genes) # total number of candidate Genes
 
-
   # TF activity prior: TF RNA expression
-  T_prior <- Candidate_TF_log2Count
-  T_mean <- Candidate_TF_log2Count
-  T_var <- matrix(0, nrow = M, ncol = S)
-  for (m in 1:M) {
-    T_var[m, ] <- var(Candidate_TF_log2Count[m, ])
-  }
+#  T_prior <- Candidate_TF_log2Count
+#  T_mean <- Candidate_TF_log2Count
+  T_MEAN <- 0
+  T_mean <- matrix(T_MEAN, nrow = M, ncol = S)
+  T_var <- matrix(T_VAR, nrow = M, ncol = S)
+
+  T_prior <- matrix(
+    rnorm(
+        M * S,
+        mean = T_MEAN,
+        sd = sqrt(T_VAR)
+    ),
+    nrow = M,
+    ncol = S
+  )
+  tf_names <- Candidate_TFs$name
+  sample_names <- loaded_data$Common_samples
+  
+  dimnames(T_mean) <- list(tf_names, sample_names)
+  dimnames(T_var) <- list(tf_names, sample_names)
+  dimnames(T_prior) <- list(tf_names, sample_names)
 
 
-  # TF-Peak binding prior: regression weight between TF activity (expression) and Peak ATAC activity
-  B_prior <- as.matrix(Candidate_TF_Peak_Binding)
-  B_prob <- as.matrix(Candidate_TF_Peak_Binding)
-  TF_Peak_index <- which(as.matrix(Candidate_TF_Peak_Binding) > 0, arr.ind = TRUE)
+ # ------------------------------------------------------------
+ # Expression-independent TF-to-peak prior
+ # ------------------------------------------------------------
 
-  for (b in 1:length(Candidate_TF_Peak_Binding@x)) {
-    mdl <- summary(lm(Candidate_Peak_log2Count[TF_Peak_index[b, 1], ] ~ Candidate_TF_log2Count[TF_Peak_index[b, 2], ]))
-    B_prior[TF_Peak_index[b, 1], TF_Peak_index[b, 2]] <- mdl$coefficients[2, 1]
-    B_prob[TF_Peak_index[b, 1], TF_Peak_index[b, 2]] <- 1 - mdl$coefficients[2, 4]
-  }
-  B_mean <- B_prior
+ # Candidate-link mask
+ B_mask <- as.matrix(
+     Candidate_TF_Peak_Binding > 0
+ )
 
-  B_var <- matrix(0.5, nrow = 1, ncol = M)
+ storage.mode(B_mask) <- "numeric"
 
-  for (m in 1:M) {
-    if (sum(Candidate_TF_Peak_Binding[, m]) > 1) {
-      B_var[m] <- var(B_prior[which(Candidate_TF_Peak_Binding[, m] > 0), m]) # variance of binding events weights of TF t
-    } else {
-      B_var[m] <- 0.5
-    }
-  }
+ # Prior settings
+ sigma_B <- sqrt(10)
+ pi_B <- 0.5
+
+ # Fixed prior mean used in every MCMC iteration
+ B_mean <- matrix(
+     0,
+     nrow = P,
+     ncol = M,
+     dimnames = dimnames(B_mask)
+ )
+
+ # Fixed prior variance used in every MCMC iteration
+ B_var <- matrix(
+     sigma_B^2,
+     nrow = 1,
+     ncol = M
+ )
+
+ # Fixed binary-state prior score
+ B_prob <- matrix(
+     0,
+     nrow = P,
+     ncol = M,
+     dimnames = dimnames(B_mask)
+ )
+
+ B_prob[B_mask > 0] <- pi_B
+
+ # Random starting values, drawn only once
+ B_initial <- matrix(
+     0,
+     nrow = P,
+     ncol = M,
+     dimnames = dimnames(B_mask)
+ )
+
+ B_initial[B_mask > 0] <- rnorm(
+     sum(B_mask > 0),
+     mean = 0,
+     sd = sigma_B
+ )
+
+
+ # B_prior <- as.matrix(Candidate_TF_Peak_Binding)
+ # B_prob <- as.matrix(Candidate_TF_Peak_Binding)
+ # TF_Peak_index <- which(as.matrix(Candidate_TF_Peak_Binding) > 0, arr.ind = TRUE)
+
+ # for (b in 1:length(Candidate_TF_Peak_Binding@x)) {
+ #   mdl <- summary(lm(Candidate_Peak_log2Count[TF_Peak_index[b, 1], ] ~ Candidate_TF_log2Count[TF_Peak_index[b, 2], ]))
+ #   B_prior[TF_Peak_index[b, 1], TF_Peak_index[b, 2]] <- mdl$coefficients[2, 1]
+ #   B_prob[TF_Peak_index[b, 1], TF_Peak_index[b, 2]] <- 1 - mdl$coefficients[2, 4]
+ # }
+ # B_mean <- B_prior
+
+ # B_var <- matrix(0.5, nrow = 1, ncol = M)
+
+ # for (m in 1:M) {
+ #   if (sum(Candidate_TF_Peak_Binding[, m]) > 1) {
+ #     B_var[m] <- var(B_prior[which(Candidate_TF_Peak_Binding[, m] > 0), m]) # variance of binding events weights of TF t
+ #   } else {
+ #     B_var[m] <- 0.5
+ #   }
+ # }
 
 
   # Peak-Gene looping prior
@@ -652,7 +721,8 @@ MAGICAL_initialization <- function(loaded_data, Candidate_circuits) {
     "T_prior" = T_prior,
     "T_mean" = T_mean,
     "T_var" = T_var,
-    "B_prior" = B_prior,
+   # "B_prior" = B_prior,
+    "B_initial" = B_initial,
     "B_mean" = B_mean,
     "B_var" = B_var,
     "B_prob" = B_prob,
@@ -809,9 +879,9 @@ TF_peak_binary_binding_B_state_sampling <- function(A, A_sample, ATAC_Cell_Sampl
           B[f, m] <- B[f, m]
           B_state[f, m] <- 1
         }
-      }
-
-      if (B_state[f, m] == 0 && B_prior_prob[f, m] > 0) {
+      } #### THIS IS WHERE WE CHANGE FROM ORIGINAL CODE. PER COPILOT: 
+        ####      "If an active link is switched off by the first block, the second block immediately runs and can switch the link back on during the same iteration."
+       else  if (B_state[f, m] == 0 && B_prior_prob[f, m] > 0) {
         mean_B <- (sum((A_sample[f, ] - temp) * TFA$T_sample[m, ]) * B_prior_var[m] / S + B_prior_mean[f, m] * sigma_A_noise) / temp_var
         vairance_B <- B_prior_var[m] * sigma_A_noise / temp_var
 
@@ -903,8 +973,9 @@ Peak_gene_binary_looping_L_state_samping <- function(R, R_sample, RNA_Cell_Sampl
           L_state[f, g] <- 1
         }
       }
-
-      if (L_state[f, g] == 0 && L_prior_prob[f, g] > 0) {
+      #### THIS IS WHERE WE CHANGE FROM ORIGINAL CODE. PER COPILOT: 
+      ####      "If an active link is switched off by the first block, the second block immediately runs and can switch the link back on during the same iteration."
+      else if (L_state[f, g] == 0 && L_prior_prob[f, g] > 0) {
         mean_L <- (sum((R_sample[g, ] - temp) * A_estimate[f, ]) * L_prior_var / S + L_prior_mean[f, g] * sigma_R_noise) / temp_var
         vairance_L <- L_prior_var * sigma_R_noise / temp_var
 
@@ -946,6 +1017,43 @@ Peak_gene_binary_looping_L_state_samping <- function(R, R_sample, RNA_Cell_Sampl
 }
 
 
+
+
+choose_diagnostic_intervals <- function(
+    iteration_num,
+    burnin,
+    target_checkpoints = 30L,
+    target_windows = 6L,
+    minimum_check_every = 10L,
+    minimum_window_size = 50L
+) {
+  n_postburnin <- iteration_num - burnin
+  
+  if (n_postburnin <= 0L) {
+    stop("`burnin` must be smaller than `iteration_num`.")
+  }
+  
+  check_every <- max(
+    minimum_check_every,
+    floor(n_postburnin / target_checkpoints)
+  )
+  
+  window_size <- max(
+    minimum_window_size,
+    floor(n_postburnin / target_windows)
+  )
+  
+  list(
+    n_postburnin = n_postburnin,
+    check_every = as.integer(check_every),
+    window_size = as.integer(window_size),
+    expected_checkpoints =
+      floor(n_postburnin / check_every),
+    expected_complete_windows =
+      floor(n_postburnin / window_size)
+  )
+}
+
 #' MCMC sampling
 #'
 #' This function estimates the parameters.
@@ -965,7 +1073,153 @@ Peak_gene_binary_looping_L_state_samping <- function(R, R_sample, RNA_Cell_Sampl
 #'
 #' @export
 
-MAGICAL_estimation <- function(loaded_data, Candidate_circuits, Initial_model, iteration_num) {
+MAGICAL_estimation <- function(
+    loaded_data,
+    Candidate_circuits,
+    Initial_model,
+    iteration_num,
+    burnin = round(iteration_num * 0.25),
+    check_every = NULL,
+    window_size = NULL,
+    target_checkpoints = 30L,
+    target_windows = 6L,
+    stability_tolerance = 0.005,
+    required_stable_checks = 4L,
+    stop_when_stable = FALSE
+) {
+
+  # ------------------------------------------------------------
+  # Validate MCMC and convergence-diagnostic settings
+  # ------------------------------------------------------------
+  
+  iteration_num <- as.integer(iteration_num)
+  burnin <- as.integer(burnin)
+  required_stable_checks <- as.integer(
+    required_stable_checks
+  )
+  
+  if (iteration_num < 1L) {
+    stop("`iteration_num` must be at least 1.")
+  }
+  
+  if (burnin < 0L || burnin >= iteration_num) {
+    stop(
+      "`burnin` must be non-negative and smaller ",
+      "than `iteration_num`."
+    )
+  }
+  
+  if (required_stable_checks < 1L) {
+    stop("`required_stable_checks` must be at least 1.")
+  }
+  
+  diagnostic_intervals <- choose_diagnostic_intervals(
+    iteration_num = iteration_num,
+    burnin = burnin,
+    target_checkpoints = target_checkpoints,
+    target_windows = target_windows
+  )
+  
+  n_postburnin_planned <-
+    diagnostic_intervals$n_postburnin
+  
+  # Use automatically selected values only when the user did not
+  # explicitly supply a value.
+  if (is.null(check_every)) {
+    check_every <-
+      diagnostic_intervals$check_every
+  }
+  
+  if (is.null(window_size)) {
+    window_size <-
+      diagnostic_intervals$window_size
+  }
+  
+  check_every <- as.integer(check_every)
+  window_size <- as.integer(window_size)
+  
+  if (length(check_every) != 1L ||
+      !is.finite(check_every) ||
+      check_every < 1L) {
+    
+    stop("`check_every` must be one positive integer.")
+  }
+  
+  if (length(window_size) != 1L ||
+      !is.finite(window_size) ||
+      window_size < 2L) {
+    
+    stop("`window_size` must be one integer of at least 2.")
+  }
+  
+  if (check_every > n_postburnin_planned) {
+    stop(
+      "`check_every` is larger than the number of ",
+      "planned post-burn-in iterations."
+    )
+  }
+  
+  if (window_size > n_postburnin_planned) {
+    stop(
+      "`window_size` is larger than the number of ",
+      "planned post-burn-in iterations."
+    )
+  }
+  
+  planned_checkpoints <- floor(
+    n_postburnin_planned / check_every
+  )
+  
+  planned_complete_windows <- floor(
+    n_postburnin_planned / window_size
+  )
+  
+  # The first cumulative checkpoint only creates a baseline.
+  # At least one additional checkpoint is needed to calculate change.
+  minimum_checkpoints <-
+    required_stable_checks + 1L
+  
+  if (planned_checkpoints < minimum_checkpoints) {
+    warning(
+      "The current settings provide only ",
+      planned_checkpoints,
+      " cumulative checkpoints. At least ",
+      minimum_checkpoints,
+      " are required to satisfy ",
+      "`required_stable_checks = ",
+      required_stable_checks,
+      "`."
+    )
+  }
+  
+  # Adjacent-window comparison requires at least two complete windows.
+  if (planned_complete_windows < 2L) {
+    warning(
+      "The current settings provide only ",
+      planned_complete_windows,
+      " complete post-burn-in window(s). ",
+      "At least two are needed for an adjacent-window comparison."
+    )
+  }
+  
+  message(
+    paste0(
+      "MCMC diagnostic schedule:\n",
+      "  total iterations: ", iteration_num, "\n",
+      "  burn-in: ", burnin, "\n",
+      "  planned post-burn-in iterations: ",
+      n_postburnin_planned, "\n",
+      "  cumulative check interval: ",
+      check_every, "\n",
+      "  expected cumulative checkpoints: ",
+      planned_checkpoints, "\n",
+      "  window size: ", window_size, "\n",
+      "  expected complete windows: ",
+      planned_complete_windows
+    )
+  )
+  
+   
   Common_samples <- loaded_data$Common_samples
   S <- length(Common_samples) # number of samples
 
@@ -996,7 +1250,8 @@ MAGICAL_estimation <- function(loaded_data, Candidate_circuits, Initial_model, i
   B_prior_mean <- Initial_model$B_mean
   B_prior_var <- Initial_model$B_var
   B_prior_prob <- Initial_model$B_prob
-  B <- Initial_model$B_prior
+ # B <- Initial_model$B_prior
+  B <- Initial_model$B_initial
   B_state <- as.matrix(Candidate_circuits$TF_Peak_Binding)
 
 
@@ -1013,7 +1268,7 @@ MAGICAL_estimation <- function(loaded_data, Candidate_circuits, Initial_model, i
   # TFA initial values
   T_prior_mean <- Initial_model$T_mean
   T_prior_var <- Initial_model$T_var
-  T_sample <- T_prior_mean
+  T_sample <- Initial_model$T_prior
   M <- nrow(T_sample) # number of TFs
 
   T_A <- matrix(0, nrow = nrow(Candidate_circuits$TFs), ncol = nrow(loaded_data$scATAC_cells))
@@ -1051,16 +1306,153 @@ MAGICAL_estimation <- function(loaded_data, Candidate_circuits, Initial_model, i
 
 
   # MCMC sampling initial state
-  iteration_seg <- round(iteration_num / 10)
+  iteration_seg <- max(
+    1L,
+    floor(iteration_num / 10L)
+  )
   B_state_frq <- B_state
   L_state_frq <- L_state
+    
 
+    n_kept <- 0L
+
+    
   print("MAGICAL integration starts ...")
   cat("\n")
 
+  #0 - set up tracking of state switching/convergence
+  n_kept <- 0L
+  stable_check_count <- 0L
+  
+  previous_B_prob <- NULL
+  previous_L_prob <- NULL
+  
+  previous_B_state <- B_state
+  previous_L_state <- L_state
+  
+  B_state_frq_diagnostic <- matrix(
+    0,
+    nrow = nrow(B_state),
+    ncol = ncol(B_state),
+    dimnames = dimnames(B_state)
+  )
+  
+  L_state_frq_diagnostic <- matrix(
+    0,
+    nrow = nrow(L_state),
+    ncol = ncol(L_state),
+    dimnames = dimnames(L_state)
+  )
+  
+  B_state_switches <- matrix(
+    0L,
+    nrow = nrow(B_state),
+    ncol = ncol(B_state),
+    dimnames = dimnames(B_state)
+  )
+  
+  L_state_switches <- matrix(
+    0L,
+    nrow = nrow(L_state),
+    ncol = ncol(L_state),
+    dimnames = dimnames(L_state)
+  )
+  
+  convergence_log <- data.frame(
+    iteration = integer(),
+    n_kept = integer(),
+    max_B_probability_change = numeric(),
+    q99_B_probability_change = numeric(),
+    max_L_probability_change = numeric(),
+    q99_L_probability_change = numeric(),
+    mean_B_switch_rate = numeric(),
+    mean_L_switch_rate = numeric(),
+    sigma_A_recent_mean = numeric(),
+    sigma_R_recent_mean = numeric(),
+    stable = logical()
+  )
+  
+B_candidate_index <- which(
+    as.matrix(Candidate_circuits$TF_Peak_Binding) > 0
+)
+
+L_candidate_index <- which(
+    as.matrix(Candidate_circuits$Peak_Gene_looping) > 0
+)
+    
+# ------------------------------------------------------------
+# Fixed-window diagnostic tracking
+# ------------------------------------------------------------
+
+window_n <- 0L
+window_start_iteration <- NA_integer_
+
+B_window_sum <- matrix(
+  0,
+  nrow = nrow(B_state),
+  ncol = ncol(B_state),
+  dimnames = dimnames(B_state)
+)
+
+L_window_sum <- matrix(
+  0,
+  nrow = nrow(L_state),
+  ncol = ncol(L_state),
+  dimnames = dimnames(L_state)
+)
+
+B_window_switches <- matrix(
+  0L,
+  nrow = nrow(B_state),
+  ncol = ncol(B_state),
+  dimnames = dimnames(B_state)
+)
+
+L_window_switches <- matrix(
+  0L,
+  nrow = nrow(L_state),
+  ncol = ncol(L_state),
+  dimnames = dimnames(L_state)
+)
+
+previous_B_window_prob <- NULL
+previous_L_window_prob <- NULL
+
+window_log <- data.frame(
+  window_start = integer(),
+  window_end = integer(),
+  window_n = integer(),
+  
+  q99_B_change_from_previous_window = numeric(),
+  max_B_change_from_previous_window = numeric(),
+  q99_L_change_from_previous_window = numeric(),
+  max_L_change_from_previous_window = numeric(),
+  
+  mean_B_probability = numeric(),
+  mean_L_probability = numeric(),
+  mean_B_switch_rate = numeric(),
+  mean_L_switch_rate = numeric(),
+  
+  median_ATAC_noise = numeric(),
+  q25_ATAC_noise = numeric(),
+  q75_ATAC_noise = numeric(),
+  q95_ATAC_noise = numeric(),
+  q99_ATAC_noise = numeric(),
+  max_ATAC_noise = numeric(),
+  
+  median_RNA_noise = numeric(),
+  q25_RNA_noise = numeric(),
+  q75_RNA_noise = numeric(),
+  q95_RNA_noise = numeric(),
+  q99_RNA_noise = numeric(),
+  max_RNA_noise = numeric()
+)
+
 
   Noise_parameters <- matrix(0, nrow = iteration_num, ncol = 2)
+  
   for (i in 1:iteration_num) {
+    
     # Step 1: TF activity sampling
     TFA <- TF_activity_T_sampling(
       A, A_sample, ATAC_Cell_Sample_vector, R, R_sample, RNA_Cell_Sample_vector,
@@ -1104,22 +1496,732 @@ MAGICAL_estimation <- function(loaded_data, Candidate_circuits, Initial_model, i
 
     Noise_parameters[i, 1] <- sigma_A_noise
     Noise_parameters[i, 2] <- sigma_R_noise
-
+    
+    
+   # ------------------------------------------------------------
+    # Post-burn-in diagnostic accumulation
+    # ------------------------------------------------------------
+    
+    if (i > burnin) {
+      
+      n_kept <- n_kept + 1L
+      
+      if (window_n == 0L) {
+        window_start_iteration <- i
+      }
+      
+      window_n <- window_n + 1L
+      
+      B_switch <- abs(B_state - previous_B_state)
+      L_switch <- abs(L_state - previous_L_state)
+      
+      # Cumulative post-burn-in diagnostics
+      B_state_frq_diagnostic <-
+        B_state_frq_diagnostic + B_state
+      
+      L_state_frq_diagnostic <-
+        L_state_frq_diagnostic + L_state
+      
+      B_state_switches <-
+        B_state_switches + B_switch
+      
+      L_state_switches <-
+        L_state_switches + L_switch
+      
+      # Current-window diagnostics
+      B_window_sum <-
+        B_window_sum + B_state
+      
+      L_window_sum <-
+        L_window_sum + L_state
+      
+      B_window_switches <-
+        B_window_switches + B_switch
+      
+      L_window_switches <-
+        L_window_switches + L_switch
+    }
+    
+    previous_B_state <- B_state
+    previous_L_state <- L_state
+    
+    # ------------------------------------------------------------
+    # Save a completed fixed-window summary
+    # ------------------------------------------------------------
+    
+    if (i > burnin && window_n == window_size) {
+      
+      B_window_prob <- B_window_sum / window_n
+      L_window_prob <- L_window_sum / window_n
+      
+      B_window_switch_rate <-
+        B_window_switches / window_n
+      
+      L_window_switch_rate <-
+        L_window_switches / window_n
+      
+      B_candidate_window_prob <-
+        B_window_prob[B_candidate_index]
+      
+      L_candidate_window_prob <-
+        L_window_prob[L_candidate_index]
+      
+      mean_B_window_probability <- mean(
+        B_candidate_window_prob,
+        na.rm = TRUE
+      )
+      
+      mean_L_window_probability <- mean(
+        L_candidate_window_prob,
+        na.rm = TRUE
+      )
+      
+      mean_B_window_switch_rate <- mean(
+        B_window_switch_rate[B_candidate_index],
+        na.rm = TRUE
+      )
+      
+      mean_L_window_switch_rate <- mean(
+        L_window_switch_rate[L_candidate_index],
+        na.rm = TRUE
+      )
+      
+      if (is.null(previous_B_window_prob)) {
+        
+        q99_B_window_change <- NA_real_
+        max_B_window_change <- NA_real_
+        q99_L_window_change <- NA_real_
+        max_L_window_change <- NA_real_
+        
+      } else {
+        
+        B_window_change <- abs(
+          B_window_prob[B_candidate_index] -
+            previous_B_window_prob[B_candidate_index]
+        )
+        
+        L_window_change <- abs(
+          L_window_prob[L_candidate_index] -
+            previous_L_window_prob[L_candidate_index]
+        )
+        
+        q99_B_window_change <- as.numeric(
+          quantile(
+            B_window_change,
+            probs = 0.99,
+            na.rm = TRUE,
+            names = FALSE
+          )
+        )
+        
+        max_B_window_change <- max(
+          B_window_change,
+          na.rm = TRUE
+        )
+        
+        q99_L_window_change <- as.numeric(
+          quantile(
+            L_window_change,
+            probs = 0.99,
+            na.rm = TRUE,
+            names = FALSE
+          )
+        )
+        
+        max_L_window_change <- max(
+          L_window_change,
+          na.rm = TRUE
+        )
+      }
+      
+      window_noise <- Noise_parameters[
+        window_start_iteration:i,
+        ,
+        drop = FALSE
+      ]
+      
+      window_log <- rbind(
+        window_log,
+        data.frame(
+          window_start = window_start_iteration,
+          window_end = i,
+          window_n = window_n,
+          
+          q99_B_change_from_previous_window =
+            q99_B_window_change,
+          
+          max_B_change_from_previous_window =
+            max_B_window_change,
+          
+          q99_L_change_from_previous_window =
+            q99_L_window_change,
+          
+          max_L_change_from_previous_window =
+            max_L_window_change,
+          
+          mean_B_probability =
+            mean_B_window_probability,
+          
+          mean_L_probability =
+            mean_L_window_probability,
+          
+          mean_B_switch_rate =
+            mean_B_window_switch_rate,
+          
+          mean_L_switch_rate =
+            mean_L_window_switch_rate,
+          
+          median_ATAC_noise =
+            median(window_noise[, 1], na.rm = TRUE),
+          
+          q25_ATAC_noise = as.numeric(
+            quantile(
+              window_noise[, 1],
+              0.25,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q75_ATAC_noise = as.numeric(
+            quantile(
+              window_noise[, 1],
+              0.75,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q95_ATAC_noise = as.numeric(
+            quantile(
+              window_noise[, 1],
+              0.95,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q99_ATAC_noise = as.numeric(
+            quantile(
+              window_noise[, 1],
+              0.99,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          max_ATAC_noise =
+            max(window_noise[, 1], na.rm = TRUE),
+          
+          median_RNA_noise =
+            median(window_noise[, 2], na.rm = TRUE),
+          
+          q25_RNA_noise = as.numeric(
+            quantile(
+              window_noise[, 2],
+              0.25,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q75_RNA_noise = as.numeric(
+            quantile(
+              window_noise[, 2],
+              0.75,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q95_RNA_noise = as.numeric(
+            quantile(
+              window_noise[, 2],
+              0.95,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          q99_RNA_noise = as.numeric(
+            quantile(
+              window_noise[, 2],
+              0.99,
+              na.rm = TRUE,
+              names = FALSE
+            )
+          ),
+          
+          max_RNA_noise =
+            max(window_noise[, 2], na.rm = TRUE)
+        )
+      )
+      
+      # Save this window for comparison with the next window
+      previous_B_window_prob <- B_window_prob
+      previous_L_window_prob <- L_window_prob
+      
+      # Reset the window accumulators
+      B_window_sum[,] <- 0
+      L_window_sum[,] <- 0
+      B_window_switches[,] <- 0L
+      L_window_switches[,] <- 0L
+      
+      window_n <- 0L
+      window_start_iteration <- NA_integer_
+    }
+    
+    
+    
+    # ------------------------------------------------------------
+    # Convergence checkpoint
+    # ------------------------------------------------------------
+    
+    if (i > burnin &&
+        n_kept >= check_every &&
+        n_kept %% check_every == 0L) {
+      
+      current_B_prob <-
+        B_state_frq_diagnostic / n_kept
+      
+      current_L_prob <-
+        L_state_frq_diagnostic / n_kept
+      
+      if (is.null(previous_B_prob) ||
+          is.null(previous_L_prob)) {
+        
+        message(
+          "Iteration ", i,
+          ": saving first post-burn-in checkpoint as baseline."
+        )
+        
+      } else {
+        
+        B_change <- abs(
+          current_B_prob - previous_B_prob
+        )
+        
+        L_change <- abs(
+          current_L_prob - previous_L_prob
+        )
+        
+        # Restrict diagnostics to candidate links
+        B_change_candidates <-
+          B_change[B_candidate_index]
+        
+        L_change_candidates <-
+          L_change[L_candidate_index]
+        
+        max_B_change <- max(
+          B_change_candidates,
+          na.rm = TRUE
+        )
+        
+        max_L_change <- max(
+          L_change_candidates,
+          na.rm = TRUE
+        )
+        
+        q99_B_change <- as.numeric(
+          quantile(
+            B_change_candidates,
+            probs = 0.99,
+            na.rm = TRUE,
+            names = FALSE
+          )
+        )
+        
+        q99_L_change <- as.numeric(
+          quantile(
+            L_change_candidates,
+            probs = 0.99,
+            na.rm = TRUE,
+            names = FALSE
+          )
+        )
+        
+        B_switch_rate <-
+          B_state_switches / n_kept
+        
+        L_switch_rate <-
+          L_state_switches / n_kept
+        
+        mean_B_switch_rate <- mean(
+          B_switch_rate[B_candidate_index],
+          na.rm = TRUE
+        )
+        
+        mean_L_switch_rate <- mean(
+          L_switch_rate[L_candidate_index],
+          na.rm = TRUE
+        )
+        
+        recent_start <- max(
+          burnin + 1L,
+          i - check_every + 1L
+        )
+        
+        sigma_A_recent_mean <- mean(
+          Noise_parameters[recent_start:i, 1],
+          na.rm = TRUE
+        )
+        
+        sigma_R_recent_mean <- mean(
+          Noise_parameters[recent_start:i, 2],
+          na.rm = TRUE
+        )
+        
+        stable_now <-
+          is.finite(q99_B_change) &&
+          is.finite(q99_L_change) &&
+          q99_B_change <= stability_tolerance &&
+          q99_L_change <= stability_tolerance
+        
+        if (stable_now) {
+          stable_check_count <-
+            stable_check_count + 1L
+        } else {
+          stable_check_count <- 0L
+        }
+        
+        convergence_log <- rbind(
+          convergence_log,
+          data.frame(
+            iteration = i,
+            n_kept = n_kept,
+            max_B_probability_change =
+              max_B_change,
+            q99_B_probability_change =
+              q99_B_change,
+            max_L_probability_change =
+              max_L_change,
+            q99_L_probability_change =
+              q99_L_change,
+            mean_B_switch_rate =
+              mean_B_switch_rate,
+            mean_L_switch_rate =
+              mean_L_switch_rate,
+            sigma_A_recent_mean =
+              sigma_A_recent_mean,
+            sigma_R_recent_mean =
+              sigma_R_recent_mean,
+            stable = stable_now
+          )
+        )
+        
+        message(sprintf(
+          paste0(
+            "Iteration %d: ",
+            "B q99 change = %.5f; ",
+            "L q99 change = %.5f; ",
+            "stable checks = %d/%d"
+          ),
+          i,
+          q99_B_change,
+          q99_L_change,
+          stable_check_count,
+          required_stable_checks
+        ))
+        
+        if (stop_when_stable &&
+            stable_check_count >=
+            required_stable_checks) {
+          
+          message(sprintf(
+            paste0(
+              "Stopping at iteration %d after %d ",
+              "consecutive stable checkpoints."
+            ),
+            i,
+            stable_check_count
+          ))
+          
+          break
+        }
+      }
+      
+      previous_B_prob <- current_B_prob
+      previous_L_prob <- current_L_prob
+    }
+    
     if (i %% iteration_seg == 0) {
       print(paste("MAGICAL finished", 10 * i / iteration_seg, "percent", sep = " "))
       cat("\n")
     }
   }
 
-  # Sample Summary
-  Candidate_TF_Peak_Binding_prob <- B_state_frq / (iteration_num + 1)
-  Candidate_Peak_Gene_Looping_prob <- L_state_frq / (iteration_num + 1)
+  # Preserve original MAGICAL probabilities
+Candidate_TF_Peak_Binding_prob <-
+    B_state_frq / (i + 1L)
 
-  Circuits_linkage_posterior <- list(
-    "TF_Peak_Binding_prob" = Candidate_TF_Peak_Binding_prob,
-    "Peak_Gene_Looping_prob" = Candidate_Peak_Gene_Looping_prob,
-    "Noise_parameters" = Noise_parameters
+Candidate_Peak_Gene_Looping_prob <-
+    L_state_frq / (i + 1L)
+
+if (n_kept == 0L) {
+    stop("No post-burn-in iterations were retained.")
+}
+
+B_state_switch_rate <-
+    B_state_switches / n_kept
+
+L_state_switch_rate <-
+    L_state_switches / n_kept
+
+
+
+# ------------------------------------------------------------
+# Save the final incomplete window, if present
+# ------------------------------------------------------------
+
+if (window_n > 0L) {
+  
+  B_window_prob <- B_window_sum / window_n
+  L_window_prob <- L_window_sum / window_n
+  
+  B_window_switch_rate <-
+    B_window_switches / window_n
+  
+  L_window_switch_rate <-
+    L_window_switches / window_n
+  
+  if (is.null(previous_B_window_prob)) {
+    
+    q99_B_window_change <- NA_real_
+    max_B_window_change <- NA_real_
+    q99_L_window_change <- NA_real_
+    max_L_window_change <- NA_real_
+    
+  } else {
+    
+    B_window_change <- abs(
+      B_window_prob[B_candidate_index] -
+        previous_B_window_prob[B_candidate_index]
+    )
+    
+    L_window_change <- abs(
+      L_window_prob[L_candidate_index] -
+        previous_L_window_prob[L_candidate_index]
+    )
+    
+    q99_B_window_change <- as.numeric(
+      quantile(
+        B_window_change,
+        0.99,
+        na.rm = TRUE,
+        names = FALSE
+      )
+    )
+    
+    max_B_window_change <- max(
+      B_window_change,
+      na.rm = TRUE
+    )
+    
+    q99_L_window_change <- as.numeric(
+      quantile(
+        L_window_change,
+        0.99,
+        na.rm = TRUE,
+        names = FALSE
+      )
+    )
+    
+    max_L_window_change <- max(
+      L_window_change,
+      na.rm = TRUE
+    )
+  }
+  
+  window_noise <- Noise_parameters[
+    window_start_iteration:i,
+    ,
+    drop = FALSE
+  ]
+  
+  window_log <- rbind(
+    window_log,
+    data.frame(
+      window_start = window_start_iteration,
+      window_end = i,
+      window_n = window_n,
+      
+      q99_B_change_from_previous_window =
+        q99_B_window_change,
+      
+      max_B_change_from_previous_window =
+        max_B_window_change,
+      
+      q99_L_change_from_previous_window =
+        q99_L_window_change,
+      
+      max_L_change_from_previous_window =
+        max_L_window_change,
+      
+      mean_B_probability = mean(
+        B_window_prob[B_candidate_index],
+        na.rm = TRUE
+      ),
+      
+      mean_L_probability = mean(
+        L_window_prob[L_candidate_index],
+        na.rm = TRUE
+      ),
+      
+      mean_B_switch_rate = mean(
+        B_window_switch_rate[B_candidate_index],
+        na.rm = TRUE
+      ),
+      
+      mean_L_switch_rate = mean(
+        L_window_switch_rate[L_candidate_index],
+        na.rm = TRUE
+      ),
+      
+      median_ATAC_noise =
+        median(window_noise[, 1], na.rm = TRUE),
+      
+      q25_ATAC_noise = as.numeric(
+        quantile(
+          window_noise[, 1],
+          0.25,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q75_ATAC_noise = as.numeric(
+        quantile(
+          window_noise[, 1],
+          0.75,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q95_ATAC_noise = as.numeric(
+        quantile(
+          window_noise[, 1],
+          0.95,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q99_ATAC_noise = as.numeric(
+        quantile(
+          window_noise[, 1],
+          0.99,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      max_ATAC_noise =
+        max(window_noise[, 1], na.rm = TRUE),
+      
+      median_RNA_noise =
+        median(window_noise[, 2], na.rm = TRUE),
+      
+      q25_RNA_noise = as.numeric(
+        quantile(
+          window_noise[, 2],
+          0.25,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q75_RNA_noise = as.numeric(
+        quantile(
+          window_noise[, 2],
+          0.75,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q95_RNA_noise = as.numeric(
+        quantile(
+          window_noise[, 2],
+          0.95,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      q99_RNA_noise = as.numeric(
+        quantile(
+          window_noise[, 2],
+          0.99,
+          na.rm = TRUE,
+          names = FALSE
+        )
+      ),
+      
+      max_RNA_noise =
+        max(window_noise[, 2], na.rm = TRUE)
+    )
   )
+}
+
+
+Circuits_linkage_posterior <- list(
+    TF_Peak_Binding_prob =
+        Candidate_TF_Peak_Binding_prob,
+
+    Peak_Gene_Looping_prob =
+        Candidate_Peak_Gene_Looping_prob,
+
+    TF_Peak_Binding_switch_rate =
+        B_state_switch_rate,
+
+    Peak_Gene_Looping_switch_rate =
+        L_state_switch_rate,
+
+    Noise_parameters =
+        Noise_parameters[
+            seq_len(i),
+            ,
+            drop = FALSE
+        ],
+
+    convergence_log = convergence_log,
+
+    burnin = burnin,
+
+    n_iterations_completed =  i,
+
+    n_post_burnin_iterations = n_kept,
+
+    reached_stability_criterion = 
+      stable_check_count >= required_stable_checks,
+    window_log = window_log,
+    window_size = window_size,
+    diagnostic_schedule = list(
+      n_postburnin_planned =
+        n_postburnin_planned,
+      
+      planned_checkpoints =
+        planned_checkpoints,
+      
+      planned_complete_windows =
+        planned_complete_windows
+    ),
+    
+    burnin =
+      burnin,
+    
+    n_iterations_completed =
+      i,
+    
+    n_post_burnin_iterations =
+      n_kept,
+    
+    reached_stability_criterion =
+      stable_check_count >=
+      required_stable_checks
+)
+
 
   return(Circuits_linkage_posterior)
 }
@@ -1204,4 +2306,786 @@ MAGICAL_circuits_output <- function(Output_file_path, Candidate_circuits, Circui
   
   # Return the results data.frame
   return(results)
+}
+plot_convergence <- function(
+    fit,
+    stability_tolerance = 0.005,
+    output_file =
+      "MAGICAL_convergence_plots/MAGICAL_convergence_diagnostics.pdf",
+    full_windows_only = TRUE
+) {
+  
+  # --------------------------------------------------------
+  # Validate input
+  # --------------------------------------------------------
+  
+  if (!is.list(fit)) {
+    stop(
+      "`fit` must be the list returned by ",
+      "MAGICAL_estimation()."
+    )
+  }
+  
+  required_elements <- c(
+    "Noise_parameters",
+    "convergence_log",
+    "window_log",
+    "burnin"
+  )
+  
+  missing_elements <- setdiff(
+    required_elements,
+    names(fit)
+  )
+  
+  if (length(missing_elements) > 0L) {
+    stop(
+      "The following elements are missing from `fit`: ",
+      paste(missing_elements, collapse = ", ")
+    )
+  }
+  
+  convergence_log <- fit$convergence_log
+  window_log <- fit$window_log
+  noise <- fit$Noise_parameters
+  
+  if (!is.matrix(noise) && !is.data.frame(noise)) {
+    stop("`fit$Noise_parameters` must be a matrix or data frame.")
+  }
+  
+  if (ncol(noise) < 2L) {
+    stop("`fit$Noise_parameters` must have at least two columns.")
+  }
+  
+  # --------------------------------------------------------
+  # Prepare output directory
+  # --------------------------------------------------------
+  
+  output_dir <- dirname(output_file)
+  
+  if (!dir.exists(output_dir)) {
+    dir.create(
+      output_dir,
+      recursive = TRUE,
+      showWarnings = FALSE
+    )
+  }
+  
+  # --------------------------------------------------------
+  # Select full windows if requested
+  # --------------------------------------------------------
+  
+  if (!is.null(window_log) && nrow(window_log) > 0L) {
+    
+    if (full_windows_only &&
+        "window_n" %in% names(window_log) &&
+        !is.null(fit$window_size)) {
+      
+      window_plot_data <- window_log[
+        window_log$window_n == fit$window_size,
+        ,
+        drop = FALSE
+      ]
+      
+    } else {
+      
+      window_plot_data <- window_log
+    }
+    
+  } else {
+    
+    window_plot_data <- data.frame()
+  }
+  
+  # --------------------------------------------------------
+  # Print diagnostic information
+  # --------------------------------------------------------
+  
+  cat("\n========================================\n")
+  cat("MAGICAL convergence diagnostics\n")
+  cat("========================================\n\n")
+  
+  cat("Output file:\n")
+  cat(output_file, "\n\n")
+  
+  cat("Iterations completed: ",
+      fit$n_iterations_completed,
+      "\n",
+      sep = ""
+  )
+  
+  cat("Burn-in: ",
+      fit$burnin,
+      "\n",
+      sep = ""
+  )
+  
+  cat("Post-burn-in iterations: ",
+      fit$n_post_burnin_iterations,
+      "\n",
+      sep = ""
+  )
+  
+  if (!is.null(fit$window_size)) {
+    cat("Window size: ",
+        fit$window_size,
+        "\n",
+        sep = ""
+    )
+  }
+  
+  cat("Stability tolerance: ",
+      stability_tolerance,
+      "\n",
+      sep = ""
+  )
+  
+  if (!is.null(fit$reached_stability_criterion)) {
+    cat(
+      "Reached cumulative stability criterion: ",
+      fit$reached_stability_criterion,
+      "\n",
+      sep = ""
+    )
+  }
+  
+  cat("\nCumulative convergence log:\n")
+  
+  if (!is.null(convergence_log) &&
+      nrow(convergence_log) > 0L) {
+    
+    print(convergence_log)
+    
+    cat("\nLast cumulative checkpoint:\n")
+    
+    print(
+      tail(convergence_log, 1L)
+    )
+    
+  } else {
+    
+    cat(
+      "No cumulative checkpoint comparisons available.\n"
+    )
+  }
+  
+  cat("\nWindow diagnostics:\n")
+  
+  if (!is.null(window_log) &&
+      nrow(window_log) > 0L) {
+    
+    print(window_log)
+    
+    cat("\nLast window:\n")
+    
+    print(
+      tail(window_log, 1L)
+    )
+    
+    if (full_windows_only &&
+        nrow(window_plot_data) < nrow(window_log)) {
+      
+      cat(
+        "\nNote: incomplete final windows are printed, ",
+        "but excluded from the plots.\n",
+        sep = ""
+      )
+    }
+    
+  } else {
+    
+    cat("No window summaries available.\n")
+  }
+  
+  # Print post-burn-in noise summaries
+  post_start <- fit$burnin + 1L
+  post_end <- nrow(noise)
+  
+  if (post_start <= post_end) {
+    
+    post_noise <- noise[
+      post_start:post_end,
+      ,
+      drop = FALSE
+    ]
+    
+    cat("\nPost-burn-in ATAC noise summary:\n")
+    
+    print(
+      quantile(
+        post_noise[, 1],
+        probs = c(
+          0,
+          0.25,
+          0.50,
+          0.75,
+          0.95,
+          0.99,
+          1
+        ),
+        na.rm = TRUE
+      )
+    )
+    
+    cat("\nPost-burn-in RNA noise summary:\n")
+    
+    print(
+      quantile(
+        post_noise[, 2],
+        probs = c(
+          0,
+          0.25,
+          0.50,
+          0.75,
+          0.95,
+          0.99,
+          1
+        ),
+        na.rm = TRUE
+      )
+    )
+  }
+  
+  # --------------------------------------------------------
+  # Determine which panels contain usable data
+  # --------------------------------------------------------
+  
+  has_B_cumulative <- !is.null(convergence_log) &&
+    nrow(convergence_log) > 0L &&
+    all(
+      c(
+        "iteration",
+        "q99_B_probability_change"
+      ) %in% names(convergence_log)
+    ) &&
+    any(
+      is.finite(
+        convergence_log$
+          q99_B_probability_change
+      )
+    )
+  
+  has_L_cumulative <- !is.null(convergence_log) &&
+    nrow(convergence_log) > 0L &&
+    all(
+      c(
+        "iteration",
+        "q99_L_probability_change"
+      ) %in% names(convergence_log)
+    ) &&
+    any(
+      is.finite(
+        convergence_log$
+          q99_L_probability_change
+      )
+    )
+  
+  has_B_window <- nrow(window_plot_data) > 0L &&
+    all(
+      c(
+        "window_end",
+        "q99_B_change_from_previous_window"
+      ) %in% names(window_plot_data)
+    ) &&
+    any(
+      is.finite(
+        window_plot_data$
+          q99_B_change_from_previous_window
+      )
+    )
+  
+  has_L_window <- nrow(window_plot_data) > 0L &&
+    all(
+      c(
+        "window_end",
+        "q99_L_change_from_previous_window"
+      ) %in% names(window_plot_data)
+    ) &&
+    any(
+      is.finite(
+        window_plot_data$
+          q99_L_change_from_previous_window
+      )
+    )
+  
+  has_ATAC_noise <- nrow(noise) > 0L &&
+    any(is.finite(noise[, 1]))
+  
+  has_RNA_noise <- nrow(noise) > 0L &&
+    any(is.finite(noise[, 2]))
+  
+  has_ATAC_window_noise <- nrow(window_plot_data) > 0L &&
+    all(
+      c(
+        "window_end",
+        "median_ATAC_noise",
+        "q95_ATAC_noise",
+        "q99_ATAC_noise"
+      ) %in% names(window_plot_data)
+    ) &&
+    any(
+      is.finite(
+        window_plot_data$median_ATAC_noise
+      )
+    )
+  
+  has_RNA_window_noise <- nrow(window_plot_data) > 0L &&
+    all(
+      c(
+        "window_end",
+        "median_RNA_noise",
+        "q95_RNA_noise",
+        "q99_RNA_noise"
+      ) %in% names(window_plot_data)
+    ) &&
+    any(
+      is.finite(
+        window_plot_data$median_RNA_noise
+      )
+    )
+  
+  # --------------------------------------------------------
+  # Helper for an empty panel
+  # --------------------------------------------------------
+  
+  empty_panel <- function(title_text, message_text) {
+    plot.new()
+    title(title_text)
+    text(
+      0.5,
+      0.5,
+      message_text,
+      cex = 0.9
+    )
+  }
+  
+  # --------------------------------------------------------
+  # Open PDF
+  # --------------------------------------------------------
+  
+  pdf(
+    file = output_file,
+    width = 12,
+    height = 16,
+    onefile = TRUE
+  )
+  
+  on.exit(dev.off(), add = TRUE)
+  
+  par(
+    mfrow = c(4, 2),
+    mar = c(4.5, 4.5, 3.5, 1.5) + 0.1,
+    oma = c(0, 0, 2, 0)
+  )
+  
+  # ========================================================
+  # Row 1: cumulative link-probability stabilization
+  # ========================================================
+  
+  if (has_B_cumulative) {
+    
+    keep <- is.finite(
+      convergence_log$iteration
+    ) &
+      is.finite(
+        convergence_log$
+          q99_B_probability_change
+      )
+    
+    plot(
+      convergence_log$iteration[keep],
+      convergence_log$
+        q99_B_probability_change[keep],
+      type = "l",
+      xlab = "Iteration",
+      ylab = "99th percentile change",
+      main = "TF-peak cumulative stabilization"
+    )
+    
+    abline(
+      h = stability_tolerance,
+      col = "red",
+      lty = 2
+    )
+    
+  } else {
+    
+    empty_panel(
+      "TF-peak cumulative stabilization",
+      paste(
+        "No cumulative checkpoint comparisons.",
+        "At least two checkpoints are required.",
+        sep = "\n"
+      )
+    )
+  }
+  
+  if (has_L_cumulative) {
+    
+    keep <- is.finite(
+      convergence_log$iteration
+    ) &
+      is.finite(
+        convergence_log$
+          q99_L_probability_change
+      )
+    
+    plot(
+      convergence_log$iteration[keep],
+      convergence_log$
+        q99_L_probability_change[keep],
+      type = "l",
+      xlab = "Iteration",
+      ylab = "99th percentile change",
+      main = "Peak-gene cumulative stabilization"
+    )
+    
+    abline(
+      h = stability_tolerance,
+      col = "red",
+      lty = 2
+    )
+    
+  } else {
+    
+    empty_panel(
+      "Peak-gene cumulative stabilization",
+      paste(
+        "No cumulative checkpoint comparisons.",
+        "At least two checkpoints are required.",
+        sep = "\n"
+      )
+    )
+  }
+  
+  # ========================================================
+  # Row 2: adjacent-window link-probability differences
+  # ========================================================
+  
+  if (has_B_window) {
+    
+    keep <- is.finite(
+      window_plot_data$window_end
+    ) &
+      is.finite(
+        window_plot_data$
+          q99_B_change_from_previous_window
+      )
+    
+    plot(
+      window_plot_data$window_end[keep],
+      window_plot_data$
+        q99_B_change_from_previous_window[keep],
+      type = "b",
+      pch = 16,
+      xlab = "Window end iteration",
+      ylab = "99th percentile difference",
+      main = "TF-peak adjacent-window differences"
+    )
+    
+    abline(
+      h = stability_tolerance,
+      col = "red",
+      lty = 2
+    )
+    
+  } else {
+    
+    empty_panel(
+      "TF-peak adjacent-window differences",
+      paste(
+        "No adjacent-window comparison available.",
+        "At least two completed windows are required.",
+        sep = "\n"
+      )
+    )
+  }
+  
+  if (has_L_window) {
+    
+    keep <- is.finite(
+      window_plot_data$window_end
+    ) &
+      is.finite(
+        window_plot_data$
+          q99_L_change_from_previous_window
+      )
+    
+    plot(
+      window_plot_data$window_end[keep],
+      window_plot_data$
+        q99_L_change_from_previous_window[keep],
+      type = "b",
+      pch = 16,
+      xlab = "Window end iteration",
+      ylab = "99th percentile difference",
+      main = "Peak-gene adjacent-window differences"
+    )
+    
+    abline(
+      h = stability_tolerance,
+      col = "red",
+      lty = 2
+    )
+    
+  } else {
+    
+    empty_panel(
+      "Peak-gene adjacent-window differences",
+      paste(
+        "No adjacent-window comparison available.",
+        "At least two completed windows are required.",
+        sep = "\n"
+      )
+    )
+  }
+  
+  # ========================================================
+  # Row 3: complete noise traces
+  # ========================================================
+  
+  if (has_ATAC_noise) {
+    
+    keep <- is.finite(noise[, 1])
+    
+    plot(
+      which(keep),
+      noise[keep, 1],
+      type = "l",
+      log = "y",
+      xlab = "Iteration",
+      ylab = "ATAC residual variance",
+      main = "ATAC noise trace, log scale"
+    )
+    
+    if (length(fit$burnin) == 1L &&
+        is.finite(fit$burnin)) {
+      
+      abline(
+        v = fit$burnin,
+        col = "red",
+        lty = 2
+      )
+    }
+    
+  } else {
+    
+    empty_panel(
+      "ATAC noise trace",
+      "No finite ATAC noise values"
+    )
+  }
+  
+  if (has_RNA_noise) {
+    
+    keep <- is.finite(noise[, 2])
+    
+    plot(
+      which(keep),
+      noise[keep, 2],
+      type = "l",
+      log = "y",
+      xlab = "Iteration",
+      ylab = "RNA residual variance",
+      main = "RNA noise trace, log scale"
+    )
+    
+    if (length(fit$burnin) == 1L &&
+        is.finite(fit$burnin)) {
+      
+      abline(
+        v = fit$burnin,
+        col = "red",
+        lty = 2
+      )
+    }
+    
+  } else {
+    
+    empty_panel(
+      "RNA noise trace",
+      "No finite RNA noise values"
+    )
+  }
+  
+  # ========================================================
+  # Row 4: window-based noise summaries
+  # ========================================================
+  
+  if (has_ATAC_window_noise) {
+    
+    keep <- is.finite(
+      window_plot_data$window_end
+    ) &
+      is.finite(
+        window_plot_data$median_ATAC_noise
+      ) &
+      is.finite(
+        window_plot_data$q95_ATAC_noise
+      ) &
+      is.finite(
+        window_plot_data$q99_ATAC_noise
+      )
+    
+    x <- window_plot_data$window_end[keep]
+    
+    y_values <- c(
+      window_plot_data$median_ATAC_noise[keep],
+      window_plot_data$q95_ATAC_noise[keep],
+      window_plot_data$q99_ATAC_noise[keep]
+    )
+    
+    y_values <- y_values[
+      is.finite(y_values) &
+        y_values > 0
+    ]
+    
+    plot(
+      x,
+      window_plot_data$median_ATAC_noise[keep],
+      type = "b",
+      pch = 16,
+      log = "y",
+      ylim = range(y_values),
+      xlab = "Window end iteration",
+      ylab = "ATAC residual variance",
+      main = "ATAC noise by window"
+    )
+    
+    lines(
+      x,
+      window_plot_data$q95_ATAC_noise[keep],
+      type = "b",
+      pch = 17,
+      col = "blue"
+    )
+    
+    lines(
+      x,
+      window_plot_data$q99_ATAC_noise[keep],
+      type = "b",
+      pch = 15,
+      col = "red"
+    )
+    
+    legend(
+      "topright",
+      legend = c(
+        "Median",
+        "95th percentile",
+        "99th percentile"
+      ),
+      col = c(
+        "black",
+        "blue",
+        "red"
+      ),
+      lty = 1,
+      pch = c(16, 17, 15),
+      bty = "n",
+      cex = 0.8
+    )
+    
+  } else {
+    
+    empty_panel(
+      "ATAC noise by window",
+      "No completed window-noise summaries"
+    )
+  }
+  
+  if (has_RNA_window_noise) {
+    
+    keep <- is.finite(
+      window_plot_data$window_end
+    ) &
+      is.finite(
+        window_plot_data$median_RNA_noise
+      ) &
+      is.finite(
+        window_plot_data$q95_RNA_noise
+      ) &
+      is.finite(
+        window_plot_data$q99_RNA_noise
+      )
+    
+    x <- window_plot_data$window_end[keep]
+    
+    y_values <- c(
+      window_plot_data$median_RNA_noise[keep],
+      window_plot_data$q95_RNA_noise[keep],
+      window_plot_data$q99_RNA_noise[keep]
+    )
+    
+    y_values <- y_values[
+      is.finite(y_values) &
+        y_values > 0
+    ]
+    
+    plot(
+      x,
+      window_plot_data$median_RNA_noise[keep],
+      type = "b",
+      pch = 16,
+      log = "y",
+      ylim = range(y_values),
+      xlab = "Window end iteration",
+      ylab = "RNA residual variance",
+      main = "RNA noise by window"
+    )
+    
+    lines(
+      x,
+      window_plot_data$q95_RNA_noise[keep],
+      type = "b",
+      pch = 17,
+      col = "blue"
+    )
+    
+    lines(
+      x,
+      window_plot_data$q99_RNA_noise[keep],
+      type = "b",
+      pch = 15,
+      col = "red"
+    )
+    
+    legend(
+      "topright",
+      legend = c(
+        "Median",
+        "95th percentile",
+        "99th percentile"
+      ),
+      col = c(
+        "black",
+        "blue",
+        "red"
+      ),
+      lty = 1,
+      pch = c(16, 17, 15),
+      bty = "n",
+      cex = 0.8
+    )
+    
+  } else {
+    
+    empty_panel(
+      "RNA noise by window",
+      "No completed window-noise summaries"
+    )
+  }
+  
+  mtext(
+    "MAGICAL MCMC convergence and window diagnostics",
+    outer = TRUE,
+    line = 0.5,
+    cex = 1.3,
+    font = 2
+  )
+  
+  cat("\nDiagnostic PDF written to:\n")
+  cat(normalizePath(output_file, mustWork = FALSE), "\n")
+  
+  invisible(output_file)
 }
